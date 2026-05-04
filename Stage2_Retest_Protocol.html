@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Stage 2 Re-Test Protocol — Bedfordshire Lace Designer</title>
+  <style>
+    body {
+      font-family: Georgia, serif;
+      font-size: 11pt;
+      max-width: 6.5in;
+      margin: 0.75in auto;
+      color: #111;
+    }
+    h1 {
+      font-size: 15pt;
+      border-bottom: 2px solid #333;
+      padding-bottom: 4px;
+      margin-bottom: 4px;
+    }
+    .subtitle {
+      font-size: 9pt;
+      color: #555;
+      margin-bottom: 24px;
+    }
+    h2 {
+      font-size: 12pt;
+      margin-top: 24px;
+      margin-bottom: 6px;
+      background: #eee;
+      padding: 3px 6px;
+    }
+    ul {
+      margin: 0 0 8px 0;
+      padding-left: 1.4em;
+    }
+    li {
+      margin-bottom: 5px;
+      line-height: 1.4;
+    }
+    .key {
+      display: inline-block;
+      font-family: monospace;
+      font-size: 10pt;
+      background: #ddd;
+      border: 1px solid #999;
+      border-radius: 3px;
+      padding: 0 4px;
+    }
+    .result {
+      margin-top: 8px;
+      border: 1px solid #bbb;
+      min-height: 48px;
+      padding: 4px 8px;
+      font-size: 9pt;
+      color: #777;
+    }
+    .result::before {
+      content: "Notes:";
+      display: block;
+      font-weight: bold;
+      color: #555;
+      margin-bottom: 2px;
+    }
+    .pass-fail {
+      font-size: 9pt;
+      margin-top: 6px;
+    }
+    .pass-fail label {
+      margin-right: 16px;
+    }
+    @media print {
+      body { margin: 0.5in auto; }
+      .result { min-height: 56px; }
+    }
+  </style>
+</head>
+<body>
+
+<h1>Stage 2 Re-Test Protocol</h1>
+<div class="subtitle">Bedfordshire Lace Designer &nbsp;|&nbsp; Date: __________ &nbsp;|&nbsp; Tester: __________</div>
+
+<p>This is a focused re-test of five fixes applied after the Stage 2 testing session.
+Only these specific behaviours need to be validated before proceeding to Stage 3.</p>
+
+
+<h2>1 &mdash; Startup &amp; Keyboard Focus</h2>
+<ul>
+  <li>Launch the app. Do <strong>not</strong> click anywhere on the canvas.</li>
+  <li>Press <span class="key">T</span> &mdash; the Trail button should activate and hint text should appear in the options bar (below the menu).</li>
+  <li>Press <span class="key">S</span> &mdash; should return to Select tool.</li>
+  <li>Press <span class="key">Esc</span> &mdash; should also return to Select tool.</li>
+  <li>Press <span class="key">T</span> again and confirm hint text returns.</li>
+</ul>
+<div class="pass-fail">
+  <label><input type="checkbox"> Pass</label>
+  <label><input type="checkbox"> Fail</label>
+</div>
+<div class="result"></div>
+
+
+<h2>2 &mdash; Start-of-Trail Artifact</h2>
+<ul>
+  <li>Press <span class="key">T</span> to activate the Trail tool.</li>
+  <li>Click once to place the first waypoint.</li>
+  <li>Move the cursor slowly away from that point.</li>
+  <li><strong>Expected:</strong> no geometry visible while cursor is within ~2 mm of the start point. Preview should appear cleanly once cursor moves further away &mdash; no star or burst shape.</li>
+</ul>
+<div class="pass-fail">
+  <label><input type="checkbox"> Pass</label>
+  <label><input type="checkbox"> Fail</label>
+</div>
+<div class="result"></div>
+
+
+<h2>3 &mdash; H-Key Temporary Pan (Bamboo Pad)</h2>
+<ul>
+  <li>Activate the Trail tool (<span class="key">T</span>), either idle or mid-draw.</li>
+  <li>Hold <span class="key">H</span> &mdash; cursor should change to a hand.</li>
+  <li>Drag with the stylus/touchpad &mdash; canvas should pan.</li>
+  <li>Release <span class="key">H</span> &mdash; should return to Trail tool automatically.</li>
+  <li>Repeat, but instead of dragging, use the <span class="key">&larr;</span> <span class="key">&rarr;</span> <span class="key">&uarr;</span> <span class="key">&darr;</span> arrow keys while holding <span class="key">H</span> &mdash; canvas should scroll.</li>
+</ul>
+<div class="pass-fail">
+  <label><input type="checkbox"> Pass</label>
+  <label><input type="checkbox"> Fail</label>
+  <label><input type="checkbox"> Partial (describe below)</label>
+</div>
+<div class="result"></div>
+
+
+<h2>4 &mdash; Shift+Click Sharp Corners</h2>
+<ul>
+  <li>Press <span class="key">T</span> to activate Trail tool.</li>
+  <li>Click to place 2 &ndash; 3 normal (smooth) waypoints.</li>
+  <li>Hold <span class="key">Shift</span> and click to place a sharp-corner waypoint.</li>
+  <li>Add 1 &ndash; 2 more normal waypoints after it.</li>
+  <li>Double-click to finish the trail.</li>
+  <li><strong>Expected:</strong> the Shift+click point is a sharp angle; surrounding points remain smooth curves.</li>
+</ul>
+<div class="pass-fail">
+  <label><input type="checkbox"> Pass</label>
+  <label><input type="checkbox"> Fail</label>
+</div>
+<div class="result"></div>
+
+
+<h2>5 &mdash; Closed Trail</h2>
+<ul>
+  <li>Press <span class="key">T</span> to activate Trail tool.</li>
+  <li>Place 4 or more waypoints in a rough loop shape (do not close yet).</li>
+  <li>Move the cursor back toward the <strong>first waypoint</strong>.</li>
+  <li><strong>Expected:</strong> a blue snap indicator appears when close to the first waypoint.</li>
+  <li>Click while the blue indicator is visible &mdash; the trail should close into a smooth loop.</li>
+  <li>Verify pinholes appear along both edges all the way around the closed shape, with no open gap at the join.</li>
+</ul>
+<div class="pass-fail">
+  <label><input type="checkbox"> Pass</label>
+  <label><input type="checkbox"> Fail</label>
+</div>
+<div class="result"></div>
+
+
+<h2>Overall</h2>
+<ul>
+  <li>Items passed: ___ / 5</li>
+  <li>Blocking issues (must fix before Stage 3): ____________________________</li>
+  <li>Minor issues (can carry forward): ____________________________</li>
+  <li>Recommendation: &nbsp;<input type="checkbox"> Proceed to Stage 3 &nbsp; <input type="checkbox"> Fix and re-test</li>
+</ul>
+
+</body>
+</html>
