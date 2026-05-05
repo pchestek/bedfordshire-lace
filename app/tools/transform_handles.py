@@ -29,9 +29,9 @@ from PySide6.QtWidgets import QApplication, QGraphicsItem
 
 class SelectionOverlay(QGraphicsItem):
 
-    _H       = 1.8   # scale handle half-size (mm)
-    _ROT_R   = 2.5   # rotation handle radius (mm)
-    _ROT_OFF = 6.0   # mm above the top edge
+    _H       = 1.0   # scale handle half-size (mm)
+    _ROT_R   = 1.5   # rotation handle radius (mm)
+    _ROT_OFF = 4.5   # mm above the top edge
 
     _SCALE_KEYS = ('TL', 'T', 'TR', 'R', 'BR', 'B', 'BL', 'L')
 
