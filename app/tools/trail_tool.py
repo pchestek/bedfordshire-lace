@@ -139,7 +139,7 @@ class TrailTool(BaseTool):
         trail = Trail(waypoints=pts, cusps=cusps,
                       starting_pairs=self._starting_pairs,
                       closed=can_close)
-        trail.compute_geometry()
+        trail.compute_geometry(skip_pinholes=True)
 
         if self._preview_item is None:
             self._preview_item = TrailItem(trail)

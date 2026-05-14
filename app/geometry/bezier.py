@@ -74,9 +74,12 @@ def bezier_tangent(seg, t):
     return 3.0*(u**2*(c1 - p0) + 2.0*u*t*(c2 - c1) + t**2*(p3 - c2))
 
 
-def sample_uniform(segs, spacing_mm, n_dense=150):
+def sample_uniform(segs, spacing_mm, n_dense=150, start_offset=0.0):
     """
     Sample a bezier path at uniform arc-length intervals of *spacing_mm*.
+
+    start_offset — arc-length position of the first sample (default 0).
+
     Returns list of (point, unit_tangent) pairs as np.ndarray(2,).
     """
     if not segs:
@@ -101,7 +104,7 @@ def sample_uniform(segs, spacing_mm, n_dense=150):
         return []
 
     result = []
-    d = 0.0
+    d = start_offset
     while d <= total + 1e-9:
         idx = int(np.searchsorted(arc, d, side='right')) - 1
         idx = max(0, min(idx, len(arc) - 2))

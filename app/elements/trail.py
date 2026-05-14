@@ -52,7 +52,7 @@ class Trail(LaceElement):
     # Geometry computation
     # ------------------------------------------------------------------
 
-    def compute_geometry(self):
+    def compute_geometry(self, skip_pinholes=False):
         """(Re)compute edge lines and pinholes from current waypoints."""
         self.left_edge     = []
         self.right_edge    = []
@@ -91,8 +91,10 @@ class Trail(LaceElement):
         if len(self.left_edge) < 2 or len(self.right_edge) < 2:
             return
 
-        self.pin_positions = trail_edge_pinholes(
-            self.left_edge, self.right_edge, PIN_SPACING_MM)
+        if not skip_pinholes:
+            self.pin_positions = trail_edge_pinholes(
+                self.left_edge, self.right_edge, PIN_SPACING_MM, segs, half_width,
+                cusps=self.cusps)
 
     def _compute_closed_edges(self, dense, half_width):
         """

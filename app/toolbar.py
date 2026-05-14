@@ -78,6 +78,7 @@ class ToolBar(QWidget):
             btn.setText(label)
             btn.setCheckable(True)
             btn.setFixedSize(48, 42)
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             if implemented:
                 btn.setToolTip(f"{label.replace(chr(10), ' ')}  [{shortcut}]")
             else:

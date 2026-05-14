@@ -32,6 +32,7 @@ class _TrailPage(QWidget):
         self._spin.setValue(3)
         self._spin.setFixedWidth(48)
         self._spin.setToolTip("Number of pairs at the start of this trail")
+        self._spin.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         layout.addWidget(self._spin)
 
         layout.addStretch()
@@ -68,6 +69,7 @@ class _LeafTallyPage(QWidget):
         self._spin.setFixedWidth(60)
         self._spin.setToolTip(
             "Width as a proportion of length (0.40 = leaf is 40% as wide as it is long)")
+        self._spin.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         layout.addWidget(self._spin)
 
         layout.addStretch()
@@ -170,7 +172,7 @@ class ToolOptionsBar(QWidget):
 
         self._stack.setCurrentIndex(0)
         labels = {
-            "select": "Select — click to select  |  [ / ]: rotate 5°  |  Shift+[ / ]: rotate 45°  |  arrows: nudge  |  Shift+arrows: micro nudge  |  Ctrl+D: duplicate",
+            "select": "Select — click: select  |  Tab: cycle all  |  Alt+click: cycle overlapping  |  Shift+click: add/remove  |  [ / ]: rotate 5°  |  Shift+[ / ]: rotate 45°  |  arrows: nudge  |  Shift+arrows: micro nudge  |  Ctrl+D: duplicate",
             "pan":    "Pan — drag to scroll the canvas  |  H: hold for temporary pan",
         }
         self._label.setText(

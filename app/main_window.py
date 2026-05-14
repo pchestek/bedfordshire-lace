@@ -1,8 +1,11 @@
+import os
+import json
+
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QGridLayout,
-    QStatusBar, QLabel,
+    QStatusBar, QLabel, QFileDialog, QMessageBox,
 )
 
 from app.ruler import HRuler, VRuler, RULER_THICKNESS
@@ -20,10 +23,14 @@ class MainWindow(QMainWindow):
         self.resize(1280, 820)
         self.setMinimumSize(800, 600)
 
+        self._current_path = None
+        self._dirty = False
+
         self._build_ui()
         self._build_menus()
         self._build_status_bar()
         self._connect_signals()
+        self._update_title()
 
     # ── UI layout ─────────────────────────────────────────────────────────────
 
@@ -93,14 +100,17 @@ class MainWindow(QMainWindow):
         act_quit.setShortcut(QKeySequence("Ctrl+Q"))
         act_quit.triggered.connect(self.close)
 
-        # New and output actions are functional; open/save await file I/O implementation
         self._act_new.setShortcut(QKeySequence("Ctrl+N"))
         self._act_new.triggered.connect(self._on_new)
+        self._act_open.setShortcut(QKeySequence("Ctrl+O"))
+        self._act_open.triggered.connect(self._on_open)
+        self._act_save.setShortcut(QKeySequence("Ctrl+S"))
+        self._act_save.triggered.connect(self._on_save)
+        self._act_save_as.setShortcut(QKeySequence("Ctrl+Shift+S"))
+        self._act_save_as.triggered.connect(self._on_save_as)
         self._act_print.triggered.connect(self._canvas.print_page)
         self._act_export_pdf.triggered.connect(self._canvas.export_pdf)
         self._act_export_svg.triggered.connect(self._canvas.export_svg)
-        for act in (self._act_open, self._act_save, self._act_save_as):
-            act.setEnabled(False)
 
         # Edit
         edit_menu = menu.addMenu("&Edit")
@@ -200,6 +210,9 @@ class MainWindow(QMainWindow):
         # Grid toggle
         self._act_grid.toggled.connect(self._canvas.set_grid_visible)
 
+        # Dirty flag — any undo stack change means the document was modified
+        self._canvas.undo_stack().indexChanged.connect(self._on_document_changed)
+
     def _on_tool_selected(self, name: str):
         self._canvas.set_tool_by_name(name)
         self._options_bar.set_tool(name)
@@ -217,9 +230,83 @@ class MainWindow(QMainWindow):
 
     # ── Misc ──────────────────────────────────────────────────────────────────
 
+    def _update_title(self):
+        name = os.path.basename(self._current_path) if self._current_path else "Untitled"
+        dirty = " •" if self._dirty else ""
+        self.setWindowTitle(f"{name}{dirty} — Bedfordshire Lace Designer")
+
+    def _on_document_changed(self):
+        self._dirty = True
+        self._update_title()
+
+    def _confirm_discard(self) -> bool:
+        if not self._dirty:
+            return True
+        reply = QMessageBox.question(
+            self, "Unsaved changes",
+            "The pattern has unsaved changes. Discard them?",
+            QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+        )
+        return reply == QMessageBox.StandardButton.Discard
+
     def _on_new(self):
+        if not self._confirm_discard():
+            return
         self._canvas.set_tool_by_name("select")
         self._canvas.clear()
+        self._current_path = None
+        self._dirty = False
+        self._update_title()
+
+    def _on_open(self):
+        if not self._confirm_discard():
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open Pattern", "", "Bedfordshire Lace patterns (*.blace)")
+        if not path:
+            return
+        try:
+            with open(path) as f:
+                data = json.load(f)
+            self._canvas.set_tool_by_name("select")
+            self._canvas.load_document(data)
+            self._current_path = path
+            self._dirty = False
+            self._update_title()
+        except Exception as e:
+            QMessageBox.warning(self, "Open failed", f"Could not open file:\n{e}")
+
+    def _on_save(self):
+        if self._current_path:
+            self._save_to(self._current_path)
+        else:
+            self._on_save_as()
+
+    def _on_save_as(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Pattern", "", "Bedfordshire Lace patterns (*.blace)")
+        if not path:
+            return
+        if not path.endswith('.blace'):
+            path += '.blace'
+        self._save_to(path)
+
+    def _save_to(self, path):
+        try:
+            data = self._canvas.dump_document()
+            with open(path, 'w') as f:
+                json.dump(data, f, indent=2)
+            self._current_path = path
+            self._dirty = False
+            self._update_title()
+        except Exception as e:
+            QMessageBox.warning(self, "Save failed", f"Could not save file:\n{e}")
+
+    def closeEvent(self, event):
+        if not self._confirm_discard():
+            event.ignore()
+        else:
+            event.accept()
 
     def _show_about(self):
         from PySide6.QtWidgets import QMessageBox

@@ -35,6 +35,7 @@ class SelectTool(BaseTool):
     def activate(self):
         self._canvas.setCursor(Qt.CursorShape.ArrowCursor)
         self._canvas.setDragMode(QGraphicsView.DragMode.RubberBandDrag)
+        self._canvas.setFocus()
         # Use item shape() (not bounding rect) for rubber-band hit testing,
         # so trail interiors don't capture the rubber band unexpectedly.
         self._canvas.setRubberBandSelectionMode(
@@ -66,7 +67,14 @@ class SelectTool(BaseTool):
 
     def mouse_press(self, scene_pos, event):
         from app.tools.transform_handles import SelectionOverlay
+        self._canvas.setFocus()
         self._sync_moved_items()
+
+        # Alt+click: cycle through overlapping items at this position
+        if (event.button() == Qt.MouseButton.LeftButton and
+                event.modifiers() & Qt.KeyboardModifier.AltModifier):
+            self._alt_click_cycle(scene_pos)
+            return
 
         # If the click lands on a transform handle, let it handle everything —
         # no pre-drag snapshot and no shift-click interference.
@@ -161,6 +169,35 @@ class SelectTool(BaseTool):
             if hasattr(item, 'apply_move'):
                 return item
         return None
+
+    def _lace_items_at(self, scene_pos):
+        """Return all lace elements at scene_pos, front-to-back."""
+        items = self._canvas.scene().items(
+            scene_pos,
+            Qt.ItemSelectionMode.IntersectsItemShape,
+            Qt.SortOrder.DescendingOrder,
+            self._canvas.transform(),
+        )
+        return [item for item in items if hasattr(item, 'apply_move')]
+
+    def _alt_click_cycle(self, scene_pos):
+        """
+        Alt+click: cycle through all lace items at scene_pos front-to-back.
+        Each successive Alt+click at the same position advances one step deeper.
+        Wraps around after reaching the rearmost item.
+        """
+        candidates = self._lace_items_at(scene_pos)
+        if not candidates:
+            return
+        # Find the shallowest selected candidate; advance to the next one
+        current = next((item for item in candidates if item.isSelected()), None)
+        if current is None:
+            next_item = candidates[0]
+        else:
+            idx = candidates.index(current)
+            next_item = candidates[(idx + 1) % len(candidates)]
+        self._canvas.scene().clearSelection()
+        next_item.setSelected(True)
 
     def _cycle_selection(self, forward: bool):
         """

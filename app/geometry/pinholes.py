@@ -1,77 +1,191 @@
-"""Pinhole placement — edge-sampling approach.
+"""Pinhole placement — centreline-projection approach.
 
-Pinholes are placed by sampling directly along the Shapely-offset edge
-polylines at uniform arc-length intervals.  This guarantees every pinhole
-lies exactly on an edge line, even at tight corners where the normal-
-projection approach would place pins inside the trail body.
+Both edges are sampled by projecting the same set of centreline arc-length
+positions onto each edge polyline.  This gives:
 
-Stagger pattern
----------------
-Side A (left edge) is sampled starting at arc-length 0.
-Side B (right edge) is sampled starting at arc-length pin_spacing / 2.
+  - Proper visual stagger: side 'b' uses centreline positions shifted by half
+    a spacing, so every 'b' pin appears halfway between adjacent 'a' pins along
+    the trail direction — on straight sections AND curves.
+  - Matched counts: both sides derive from the same centreline sample set.
+  - Corner pins: an explicit centreline sample is inserted at each cusp waypoint
+    so both edges are guaranteed a pin right at every sharp corner.
 
-Same-side pins are therefore pin_spacing apart; adjacent cross-side pins
-are pin_spacing / 2 apart.
+Deduplication (0.55 × spacing)
+--------------------------------
+At a tight inner corner several consecutive centreline samples may project to
+nearly the same point.  The dedup threshold (1.65 mm at default spacing) is
+large enough to collapse them AND to catch the closure near-duplicate on closed
+trails, while staying well below the nominal 3 mm pin spacing so legitimate
+distinct pins are never merged.
+
+Cusp pin forcing
+----------------
+After the regular projections, each cusp is handled explicitly using the
+analytical mitre formula to find the exact expected corner position on each
+edge, then _nearest_on_polyline to the expected position finds the actual
+Shapely-generated edge vertex.
+
+  Inner edge (V-notch): expected tip = analytical mitre intersection on the
+      concave side.  _nearest_on_polyline returns the V-notch vertex exactly.
+  Outer edge (spike):   expected tip = analytical mitre intersection on the
+      convex side.  _nearest_on_polyline finds the spike-tip vertex, NOT a
+      point on the side of the spike (which is what projecting the centreline
+      waypoint finds — it returns the side of the spike at half_width distance,
+      not the tip that extends further).
+
+This approach works for both edges with the same code path, without needing to
+determine which edge is inner or outer.  If the mitre is clipped to a bevel
+(mitre_limit exceeded), _nearest_on_polyline falls back gracefully to the
+nearest bevel endpoint.
 """
 import math
-import bisect
+
+from app.geometry.bezier import sample_uniform
 
 
-def trail_edge_pinholes(left_edge, right_edge, pin_spacing_mm):
+def trail_edge_pinholes(left_edge, right_edge, pin_spacing_mm, segs, half_width,
+                        cusps=None):
     """
     Place staggered pinholes along the two edge polylines.
 
-    left_edge, right_edge — lists of (x, y) from offset_polyline().
-    pin_spacing_mm        — spacing between same-side consecutive pins.
+    left_edge, right_edge — lists of (x, y) from offset_polyline() or buffer().
+    pin_spacing_mm        — centreline spacing between same-side consecutive pins.
+    segs                  — Bezier segments from waypoints_to_bezier().
+    half_width            — trail half-width in mm.
+    cusps                 — optional list of bool parallel to waypoints;
+                            True = cusp at that waypoint → force corner pin.
 
     Returns list of dicts:
-        {'x': float, 'y': float, 'side': 'a'|'b', 'corner': False}
+        {'x': float, 'y': float, 'side': 'a'|'b', 'corner': bool}
     """
+    if not segs or not left_edge or not right_edge:
+        return []
+
+    # n_dense=50 is sufficient for typical lace trail arcs (spacing 3 mm,
+    # trail length 20–150 mm) and keeps interactive recompute fast.
+    cl_a = sample_uniform(segs, pin_spacing_mm, n_dense=50, start_offset=0.0)
+    cl_b = sample_uniform(segs, pin_spacing_mm, n_dense=50,
+                          start_offset=pin_spacing_mm / 2.0)
+
+    # Pre-compute cusp data: cusp position + normalised in/out directions.
+    cusp_data = []  # [(wx, wy, d_in, d_out), ...]
+    if cusps:
+        for i in range(len(segs) - 1):
+            if i + 1 < len(cusps) and cusps[i + 1]:
+                pt = segs[i][3]
+                # Incoming: seg i start → end
+                raw_in_x = float(segs[i][3][0]) - float(segs[i][0][0])
+                raw_in_y = float(segs[i][3][1]) - float(segs[i][0][1])
+                n = math.hypot(raw_in_x, raw_in_y)
+                d_in = (raw_in_x / n, raw_in_y / n) if n > 1e-9 else (1.0, 0.0)
+                # Outgoing: seg i+1 start → end
+                raw_out_x = float(segs[i + 1][3][0]) - float(segs[i + 1][0][0])
+                raw_out_y = float(segs[i + 1][3][1]) - float(segs[i + 1][0][1])
+                n = math.hypot(raw_out_x, raw_out_y)
+                d_out = (raw_out_x / n, raw_out_y / n) if n > 1e-9 else (1.0, 0.0)
+                cusp_data.append((float(pt[0]), float(pt[1]), d_in, d_out))
+
     pins = []
+    _DEDUP_MM = pin_spacing_mm * 0.55
 
-    for pt in _sample_polyline(left_edge, 0.0, pin_spacing_mm):
-        pins.append({'x': pt[0], 'y': pt[1], 'side': 'a', 'corner': False})
+    for pt, _ in cl_a:
+        x, y = _nearest_on_polyline(left_edge, (float(pt[0]), float(pt[1])))
+        _insert_if_not_covered(pins, x, y, 'a', _DEDUP_MM)
 
-    for pt in _sample_polyline(right_edge, pin_spacing_mm / 2.0, pin_spacing_mm):
-        pins.append({'x': pt[0], 'y': pt[1], 'side': 'b', 'corner': False})
+    for pt, _ in cl_b:
+        x, y = _nearest_on_polyline(right_edge, (float(pt[0]), float(pt[1])))
+        _insert_if_not_covered(pins, x, y, 'b', _DEDUP_MM)
+
+    _CUSP_CLEAR_MM = pin_spacing_mm * 0.6
+
+    for wx, wy, d_in, d_out in cusp_data:
+        # Compute expected corner positions analytically for each edge, then
+        # snap to the actual nearest edge point (handles mitre-clip gracefully).
+        expected_a = _compute_offset_corner(wx, wy, d_in, d_out, half_width,
+                                            positive=True)
+        expected_b = _compute_offset_corner(wx, wy, d_in, d_out, half_width,
+                                            positive=False)
+
+        ex_a, ey_a = _nearest_on_polyline(left_edge,  expected_a)
+        ex_b, ey_b = _nearest_on_polyline(right_edge, expected_b)
+
+        for ex, ey, side in ((ex_a, ey_a, 'a'), (ex_b, ey_b, 'b')):
+            pins = [p for p in pins
+                    if not (p['side'] == side
+                            and math.hypot(p['x'] - ex, p['y'] - ey) < _CUSP_CLEAR_MM)]
+            pins.append({'x': ex, 'y': ey, 'side': side, 'corner': True})
 
     return pins
 
 
-def _sample_polyline(points, start_offset, spacing):
+# ── Helpers ──────────────────────────────────────────────────────────────────
+
+def _compute_offset_corner(wx, wy, d_in, d_out, hw, positive):
     """
-    Sample a polyline at uniform arc-length intervals.
+    Compute the ideal mitre corner position for an offset line at a cusp.
 
-    start_offset — arc-length position of the first sample.
-    spacing      — distance between consecutive samples.
+    For offset distance +hw (positive=True, left_edge / side 'a') the normal
+    direction is n = (-dy, dx) — Shapely's mathematical left convention applied
+    to screen coordinates where positive offset → visual right for rightward
+    travel (Y increases downward).
 
-    Returns list of (x, y) tuples.
+    For negative offset (positive=False, right_edge / side 'b') the normal is
+    n = (+dy, -dx).
+
+    The mitre tip is found by intersecting the two offset lines: one offset from
+    the incoming segment, one from the outgoing segment.
     """
-    pts = list(points)
-    if len(pts) < 2 or spacing <= 0:
-        return []
+    if positive:
+        nx_in, ny_in   = -d_in[1],  d_in[0]
+        nx_out, ny_out = -d_out[1], d_out[0]
+    else:
+        nx_in, ny_in   =  d_in[1], -d_in[0]
+        nx_out, ny_out =  d_out[1], -d_out[0]
 
-    # Build cumulative arc-length table
-    arc = [0.0]
-    for i in range(1, len(pts)):
-        dx = pts[i][0] - pts[i - 1][0]
-        dy = pts[i][1] - pts[i - 1][1]
-        arc.append(arc[-1] + math.sqrt(dx * dx + dy * dy))
+    # Solve: hw*n_in + t*d_in = hw*n_out + s*d_out  (intersect the two lines)
+    # det = -cross(d_in, d_out)
+    det = -(d_in[0] * d_out[1] - d_in[1] * d_out[0])
+    if abs(det) < 1e-9:
+        return (wx + hw * nx_out, wy + hw * ny_out)
 
-    total = arc[-1]
-    if total <= 0:
-        return []
+    bx = hw * (nx_out - nx_in)
+    by = hw * (ny_out - ny_in)
+    t  = (-bx * d_out[1] + by * d_out[0]) / det
 
-    result = []
-    d = start_offset
-    while d <= total + 1e-9:
-        idx = bisect.bisect_right(arc, d) - 1
-        idx = max(0, min(idx, len(arc) - 2))
-        d0, d1 = arc[idx], arc[idx + 1]
-        frac = (d - d0) / (d1 - d0) if d1 > d0 else 0.0
-        x = pts[idx][0] + frac * (pts[idx + 1][0] - pts[idx][0])
-        y = pts[idx][1] + frac * (pts[idx + 1][1] - pts[idx][1])
-        result.append((x, y))
-        d += spacing
+    return (wx + hw * nx_in + t * d_in[0],
+            wy + hw * ny_in + t * d_in[1])
 
-    return result
+
+def _nearest_on_polyline(points, target):
+    """Nearest point on a polyline (including segment interiors) to target."""
+    if not points:
+        return target
+    if len(points) == 1:
+        return points[0]
+    tx, ty = target
+    best_d2 = float('inf')
+    best = points[0]
+    for i in range(len(points) - 1):
+        ax, ay = points[i]
+        bx, by = points[i + 1]
+        dx, dy = bx - ax, by - ay
+        seg_sq = dx * dx + dy * dy
+        if seg_sq < 1e-12:
+            px, py = ax, ay
+        else:
+            t = max(0.0, min(1.0, ((tx - ax) * dx + (ty - ay) * dy) / seg_sq))
+            px = ax + t * dx
+            py = ay + t * dy
+        d2 = (tx - px) ** 2 + (ty - py) ** 2
+        if d2 < best_d2:
+            best_d2 = d2
+            best = (px, py)
+    return best
+
+
+def _insert_if_not_covered(pins, x, y, side, min_dist):
+    """Add a pin at (x, y) if no same-side pin is already within min_dist."""
+    for p in pins:
+        if p['side'] == side and math.hypot(p['x'] - x, p['y'] - y) < min_dist:
+            return
+    pins.append({'x': x, 'y': y, 'side': side, 'corner': False})

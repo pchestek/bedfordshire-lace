@@ -312,6 +312,53 @@ class LaceCanvas(QGraphicsView):
         for item in prev_selected:
             item.setSelected(True)
 
+    # ── Document serialisation ────────────────────────────────────────────────
+
+    def dump_document(self) -> dict:
+        """Return a serialisable dict representing the current document."""
+        return {
+            'version': 1,
+            'elements': [item.get_state() for _, item in self._elements],
+        }
+
+    def load_document(self, data: dict):
+        """Clear the canvas and rebuild it from a serialised document dict."""
+        from app.elements.trail import Trail, TrailItem
+        from app.elements.plait import Plait, PlaitItem, Picot
+        from app.elements.leaf_tally import LeafTally, LeafTallyItem
+
+        self.clear()
+        for ed in data.get('elements', []):
+            etype = ed.get('type')
+            if etype == 'trail':
+                element = Trail(
+                    waypoints=[tuple(p) for p in ed['waypoints']],
+                    cusps=list(ed['cusps']),
+                    starting_pairs=ed['starting_pairs'],
+                    closed=ed['closed'],
+                )
+                element.compute_geometry()
+                item = TrailItem(element)
+            elif etype == 'plait':
+                element = Plait(
+                    start=tuple(ed['start']),
+                    end=tuple(ed['end']),
+                )
+                for pt, ps in ed.get('picots', []):
+                    element.toggle_picot(pt, ps)
+                item = PlaitItem(element)
+            elif etype == 'leaf':
+                element = LeafTally(
+                    pin1=tuple(ed['pin1']),
+                    pin2=tuple(ed['pin2']),
+                    leaf_width=ed['leaf_width'],
+                )
+                item = LeafTallyItem(element)
+            else:
+                continue
+            self._scene.addItem(item)
+            self.add_element(element, item)
+
     def node_tool(self):
         return self._node_tool
 
@@ -431,8 +478,6 @@ class LaceCanvas(QGraphicsView):
             super().keyReleaseEvent(event)
 
     def focusNextPrevChild(self, next: bool) -> bool:
-        # Returning False prevents Qt from consuming Tab/Shift+Tab for widget
-        # focus traversal, so those keys reach keyPressEvent instead.
         return False
 
     def showEvent(self, event):
