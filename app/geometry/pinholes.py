@@ -33,10 +33,14 @@ Shapely-generated edge vertex.
       waypoint finds — it returns the side of the spike at half_width distance,
       not the tip that extends further).
 
-This approach works for both edges with the same code path, without needing to
-determine which edge is inner or outer.  If the mitre is clipped to a bevel
-(mitre_limit exceeded), _nearest_on_polyline falls back gracefully to the
-nearest bevel endpoint.
+Corner gap filling
+------------------
+At sharp corners the inner edge arc is much shorter than the outer arc, so
+centreline projections cluster near the V-notch and most get removed by
+deduplication.  After placing corner pins, _fill_corner_gap walks outward
+from each corner pin along the edge at spacing intervals, inserting
+edge-sampled pins until an existing regular pin is reached.  This ensures
+the inner edge has enough pins for weaving even at tight angles.
 """
 import math
 
@@ -98,6 +102,10 @@ def trail_edge_pinholes(left_edge, right_edge, pin_spacing_mm, segs, half_width,
 
     _CUSP_CLEAR_MM = pin_spacing_mm * 0.6
 
+    # Compute arc parameterizations once for gap-filling (only if cusps exist).
+    left_arcs  = _arc_parameterize(left_edge)  if cusp_data else []
+    right_arcs = _arc_parameterize(right_edge) if cusp_data else []
+
     for wx, wy, d_in, d_out in cusp_data:
         # Compute expected corner positions analytically for each edge, then
         # snap to the actual nearest edge point (handles mitre-clip gracefully).
@@ -114,6 +122,14 @@ def trail_edge_pinholes(left_edge, right_edge, pin_spacing_mm, segs, half_width,
                     if not (p['side'] == side
                             and math.hypot(p['x'] - ex, p['y'] - ey) < _CUSP_CLEAR_MM)]
             pins.append({'x': ex, 'y': ey, 'side': side, 'corner': True})
+
+        # Fill any gap between the corner pin and the nearest regular pin on
+        # each edge.  At sharp angles the inner arc collapses, removing regular
+        # pins via deduplication; this restores spacing-interval coverage.
+        _fill_corner_gap(pins, left_edge,  left_arcs,  'a', ex_a, ey_a,
+                         pin_spacing_mm)
+        _fill_corner_gap(pins, right_edge, right_arcs, 'b', ex_b, ey_b,
+                         pin_spacing_mm)
 
     return pins
 
@@ -154,6 +170,96 @@ def _compute_offset_corner(wx, wy, d_in, d_out, hw, positive):
 
     return (wx + hw * nx_in + t * d_in[0],
             wy + hw * ny_in + t * d_in[1])
+
+
+def _arc_parameterize(points):
+    """Cumulative arc lengths at each vertex of a polyline."""
+    arcs = [0.0]
+    for i in range(1, len(points)):
+        dx = points[i][0] - points[i - 1][0]
+        dy = points[i][1] - points[i - 1][1]
+        arcs.append(arcs[-1] + math.hypot(dx, dy))
+    return arcs
+
+
+def _nearest_arc_on_polyline(points, arcs, target):
+    """Arc-length position of the nearest point on the polyline to target."""
+    tx, ty = target
+    best_d2  = float('inf')
+    best_arc = 0.0
+    for i in range(len(points) - 1):
+        ax, ay = points[i]
+        bx, by = points[i + 1]
+        dx, dy = bx - ax, by - ay
+        seg_sq = dx * dx + dy * dy
+        if seg_sq < 1e-12:
+            t = 0.0
+        else:
+            t = max(0.0, min(1.0, ((tx - ax) * dx + (ty - ay) * dy) / seg_sq))
+        px = ax + t * dx
+        py = ay + t * dy
+        d2 = (tx - px) ** 2 + (ty - py) ** 2
+        if d2 < best_d2:
+            best_d2  = d2
+            best_arc = arcs[i] + t * (arcs[i + 1] - arcs[i])
+    return best_arc
+
+
+def _point_at_arc(points, arcs, d):
+    """Point on polyline at arc-length d."""
+    if d <= 0.0:
+        return points[0]
+    if d >= arcs[-1]:
+        return points[-1]
+    for i in range(len(arcs) - 1):
+        if arcs[i] <= d <= arcs[i + 1]:
+            seg_len = arcs[i + 1] - arcs[i]
+            t = (d - arcs[i]) / seg_len if seg_len > 1e-12 else 0.0
+            ax, ay = points[i]
+            bx, by = points[i + 1]
+            return (ax + t * (bx - ax), ay + t * (by - ay))
+    return points[-1]
+
+
+def _has_pin_nearby(pins, x, y, side, radius):
+    """True if a same-side pin exists within radius of (x, y)."""
+    for p in pins:
+        if p['side'] == side and math.hypot(p['x'] - x, p['y'] - y) < radius:
+            return True
+    return False
+
+
+def _fill_corner_gap(pins, edge_points, arcs, side, corner_x, corner_y, spacing):
+    """
+    Walk outward from a corner pin along the edge at spacing intervals,
+    inserting pins until an existing same-side pin is reached.
+
+    Fills the gap that forms on the inner edge when sharp-corner deduplication
+    removes the clustered centreline-projected pins near the V-notch.
+    """
+    if not arcs or arcs[-1] < spacing * 0.1:
+        return
+    _DEDUP = spacing * 0.55
+    corner_arc = _nearest_arc_on_polyline(edge_points, arcs,
+                                          (corner_x, corner_y))
+
+    # Walk toward arc start (the trail arm approaching the corner).
+    d = corner_arc - spacing
+    while d > 0.0:
+        px, py = _point_at_arc(edge_points, arcs, d)
+        if _has_pin_nearby(pins, px, py, side, _DEDUP):
+            break
+        pins.append({'x': px, 'y': py, 'side': side, 'corner': False})
+        d -= spacing
+
+    # Walk toward arc end (the trail arm leaving the corner).
+    d = corner_arc + spacing
+    while d < arcs[-1]:
+        px, py = _point_at_arc(edge_points, arcs, d)
+        if _has_pin_nearby(pins, px, py, side, _DEDUP):
+            break
+        pins.append({'x': px, 'y': py, 'side': side, 'corner': False})
+        d += spacing
 
 
 def _nearest_on_polyline(points, target):
