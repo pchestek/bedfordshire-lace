@@ -46,6 +46,8 @@ class Trail(LaceElement):
 
         self.left_edge     = []
         self.right_edge    = []
+        self.centerline    = []  # dense polyline of the centerline (mm); used by crossing detection
+        self.half_width    = 0.0
         self.pin_positions = []
 
     # ------------------------------------------------------------------
@@ -56,6 +58,8 @@ class Trail(LaceElement):
         """(Re)compute edge lines and pinholes from current waypoints."""
         self.left_edge     = []
         self.right_edge    = []
+        self.centerline    = []
+        self.half_width    = 0.0
         self.pin_positions = []
 
         if len(self.waypoints) < 2:
@@ -79,8 +83,11 @@ class Trail(LaceElement):
         if total_len < _MIN_PATH_LEN_MM:
             return
 
+        self.centerline = list(dense)
+
         trail_width = self.starting_pairs * _PAIR_WIDTH_MM
         half_width  = trail_width / 2.0
+        self.half_width = half_width
 
         if self.closed:
             self._compute_closed_edges(dense, half_width)
@@ -94,7 +101,7 @@ class Trail(LaceElement):
         if not skip_pinholes:
             self.pin_positions = trail_edge_pinholes(
                 self.left_edge, self.right_edge, PIN_SPACING_MM, segs, half_width,
-                cusps=self.cusps)
+                cusps=self.cusps, closed=self.closed)
 
     def _compute_closed_edges(self, dense, half_width):
         """
@@ -174,7 +181,8 @@ class TrailItem(QGraphicsItem):
         self.update()
 
     def pin_positions(self):
-        return [(p['x'], p['y']) for p in self._trail.pin_positions]
+        return [(p['x'], p['y']) for p in self._trail.pin_positions
+                if not p.get('suppressed')]
 
     def apply_rotation(self, cx, cy, c, s, orig):
         t = self._trail
@@ -206,6 +214,7 @@ class TrailItem(QGraphicsItem):
         t.waypoints    = [(x + dx, y + dy) for x, y in t.waypoints]
         t.left_edge    = [(x + dx, y + dy) for x, y in t.left_edge]
         t.right_edge   = [(x + dx, y + dy) for x, y in t.right_edge]
+        t.centerline   = [(x + dx, y + dy) for x, y in t.centerline]
         t.pin_positions = [
             {**p, 'x': p['x'] + dx, 'y': p['y'] + dy}
             for p in t.pin_positions
@@ -239,6 +248,8 @@ class TrailItem(QGraphicsItem):
 
         r = PINHOLE_RADIUS_MM + 0.8
         for pin in self._trail.pin_positions:
+            if pin.get('suppressed'):
+                continue
             hit.addEllipse(QPointF(pin['x'], pin['y']), r, r)
 
         return hit
@@ -261,6 +272,8 @@ class TrailItem(QGraphicsItem):
         painter.setBrush(QBrush(color))
         r = PINHOLE_RADIUS_MM
         for pin in self._trail.pin_positions:
+            if pin.get('suppressed'):
+                continue
             painter.drawEllipse(QPointF(pin['x'], pin['y']), r, r)
 
     # ------------------------------------------------------------------

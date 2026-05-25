@@ -18,10 +18,10 @@ large enough to collapse them AND to catch the closure near-duplicate on closed
 trails, while staying well below the nominal 3 mm pin spacing so legitimate
 distinct pins are never merged.
 
-Cusp pin forcing
-----------------
-After the regular projections, each cusp is handled explicitly using the
-analytical mitre formula to find the exact expected corner position on each
+Cusp pin forcing — interior waypoints
+--------------------------------------
+After the regular projections, each interior cusp is handled explicitly using
+the analytical mitre formula to find the exact expected corner position on each
 edge, then _nearest_on_polyline to the expected position finds the actual
 Shapely-generated edge vertex.
 
@@ -33,14 +33,23 @@ Shapely-generated edge vertex.
       waypoint finds — it returns the side of the spike at half_width distance,
       not the tip that extends further).
 
-Corner gap filling
-------------------
+Cusp pin forcing — endpoint waypoints
+--------------------------------------
+For open trails with a cusp at the first or last waypoint, the mitre formula
+is inapplicable (the direction simply reverses at the cap).  Instead, the
+actual edge cap vertices (left_edge[0]/[-1], right_edge[0]/[-1]) are used
+directly as the corner pin positions.
+
+Corner redistribution
+---------------------
 At sharp corners the inner edge arc is much shorter than the outer arc, so
-centreline projections cluster near the V-notch and most get removed by
-deduplication.  After placing corner pins, _fill_corner_gap walks outward
-from each corner pin along the edge at spacing intervals, inserting
-edge-sampled pins until an existing regular pin is reached.  This ensures
-the inner edge has enough pins for weaving even at tight angles.
+centreline projections produce uneven counts and clustering on each side
+(inner pins crowd into the V-notch and dedupe out; outer pins spread along
+the spike).  _redistribute_corner_pins solves this per-edge: it clears
+existing same-side pins within 2.5 * spacing arc-length of the corner, places
+the corner pin, then walks outward at exact spacing intervals up to
+2 * spacing in each direction.  Both edges processed this way end up with
+matched pin counts and visually even spacing around the corner.
 """
 import math
 
@@ -48,7 +57,7 @@ from app.geometry.bezier import sample_uniform
 
 
 def trail_edge_pinholes(left_edge, right_edge, pin_spacing_mm, segs, half_width,
-                        cusps=None):
+                        cusps=None, closed=False):
     """
     Place staggered pinholes along the two edge polylines.
 
@@ -100,11 +109,10 @@ def trail_edge_pinholes(left_edge, right_edge, pin_spacing_mm, segs, half_width,
         x, y = _nearest_on_polyline(right_edge, (float(pt[0]), float(pt[1])))
         _insert_if_not_covered(pins, x, y, 'b', _DEDUP_MM)
 
-    _CUSP_CLEAR_MM = pin_spacing_mm * 0.6
-
-    # Compute arc parameterizations once for gap-filling (only if cusps exist).
-    left_arcs  = _arc_parameterize(left_edge)  if cusp_data else []
-    right_arcs = _arc_parameterize(right_edge) if cusp_data else []
+    # Compute arc parameterizations if any cusp exists (interior or endpoint).
+    has_any_cusp = bool(cusps and any(cusps))
+    left_arcs  = _arc_parameterize(left_edge)  if has_any_cusp else []
+    right_arcs = _arc_parameterize(right_edge) if has_any_cusp else []
 
     for wx, wy, d_in, d_out in cusp_data:
         # Compute expected corner positions analytically for each edge, then
@@ -117,19 +125,30 @@ def trail_edge_pinholes(left_edge, right_edge, pin_spacing_mm, segs, half_width,
         ex_a, ey_a = _nearest_on_polyline(left_edge,  expected_a)
         ex_b, ey_b = _nearest_on_polyline(right_edge, expected_b)
 
-        for ex, ey, side in ((ex_a, ey_a, 'a'), (ex_b, ey_b, 'b')):
-            pins = [p for p in pins
-                    if not (p['side'] == side
-                            and math.hypot(p['x'] - ex, p['y'] - ey) < _CUSP_CLEAR_MM)]
-            pins.append({'x': ex, 'y': ey, 'side': side, 'corner': True})
+        _redistribute_corner_pins(pins, left_edge,  left_arcs,  'a',
+                                  ex_a, ey_a, pin_spacing_mm)
+        _redistribute_corner_pins(pins, right_edge, right_arcs, 'b',
+                                  ex_b, ey_b, pin_spacing_mm)
 
-        # Fill any gap between the corner pin and the nearest regular pin on
-        # each edge.  At sharp angles the inner arc collapses, removing regular
-        # pins via deduplication; this restores spacing-interval coverage.
-        _fill_corner_gap(pins, left_edge,  left_arcs,  'a', ex_a, ey_a,
-                         pin_spacing_mm)
-        _fill_corner_gap(pins, right_edge, right_arcs, 'b', ex_b, ey_b,
-                         pin_spacing_mm)
+    # Endpoint cusps on open trails.  The mitre formula is degenerate at a
+    # trail endpoint (the outgoing direction simply reverses), so use the
+    # actual edge cap vertices directly instead.
+    if not closed and cusps and left_arcs:
+        if cusps[-1]:  # cusp at the last waypoint (trail end)
+            ex_a, ey_a = left_edge[-1][0],  left_edge[-1][1]
+            ex_b, ey_b = right_edge[-1][0], right_edge[-1][1]
+            _redistribute_corner_pins(pins, left_edge,  left_arcs,  'a',
+                                      ex_a, ey_a, pin_spacing_mm)
+            _redistribute_corner_pins(pins, right_edge, right_arcs, 'b',
+                                      ex_b, ey_b, pin_spacing_mm)
+
+        if cusps[0]:  # cusp at the first waypoint (trail start)
+            ex_a, ey_a = left_edge[0][0],  left_edge[0][1]
+            ex_b, ey_b = right_edge[0][0], right_edge[0][1]
+            _redistribute_corner_pins(pins, left_edge,  left_arcs,  'a',
+                                      ex_a, ey_a, pin_spacing_mm)
+            _redistribute_corner_pins(pins, right_edge, right_arcs, 'b',
+                                      ex_b, ey_b, pin_spacing_mm)
 
     return pins
 
@@ -221,43 +240,49 @@ def _point_at_arc(points, arcs, d):
     return points[-1]
 
 
-def _has_pin_nearby(pins, x, y, side, radius):
-    """True if a same-side pin exists within radius of (x, y)."""
-    for p in pins:
-        if p['side'] == side and math.hypot(p['x'] - x, p['y'] - y) < radius:
-            return True
-    return False
+def _redistribute_corner_pins(pins, edge_points, arcs, side,
+                              corner_x, corner_y, spacing):
+    """Replace corner-zone pins with evenly-arc-spaced pins along the edge.
 
-
-def _fill_corner_gap(pins, edge_points, arcs, side, corner_x, corner_y, spacing):
+    Removes all same-side pins within 2.5 * spacing arc-length of the corner,
+    inserts the corner pin at its exact position, then walks outward at exact
+    spacing arc-length intervals up to 2 * spacing in each direction.  Both
+    edges processed this way end up with matched pin counts and visually even
+    spacing around the corner; the 0.5 * spacing buffer between the outermost
+    redistributed pin and the first surviving regular pin keeps the boundary
+    from clumping.
     """
-    Walk outward from a corner pin along the edge at spacing intervals,
-    inserting pins until an existing same-side pin is reached.
-
-    Fills the gap that forms on the inner edge when sharp-corner deduplication
-    removes the clustered centreline-projected pins near the V-notch.
-    """
-    if not arcs or arcs[-1] < spacing * 0.1:
+    if not arcs or arcs[-1] < spacing * 0.5:
         return
-    _DEDUP = spacing * 0.55
+
     corner_arc = _nearest_arc_on_polyline(edge_points, arcs,
                                           (corner_x, corner_y))
+    clear_radius = 2.5 * spacing
+    walk_radius  = 2.0 * spacing
+    zone_min = max(0.0,       corner_arc - clear_radius)
+    zone_max = min(arcs[-1],  corner_arc + clear_radius)
 
-    # Walk toward arc start (the trail arm approaching the corner).
+    keep = []
+    for p in pins:
+        if p['side'] != side:
+            keep.append(p)
+            continue
+        p_arc = _nearest_arc_on_polyline(edge_points, arcs, (p['x'], p['y']))
+        if not (zone_min <= p_arc <= zone_max):
+            keep.append(p)
+    pins[:] = keep
+
+    pins.append({'x': corner_x, 'y': corner_y, 'side': side, 'corner': True})
+
     d = corner_arc - spacing
-    while d > 0.0:
+    while d >= 0.0 and (corner_arc - d) <= walk_radius + 1e-6:
         px, py = _point_at_arc(edge_points, arcs, d)
-        if _has_pin_nearby(pins, px, py, side, _DEDUP):
-            break
         pins.append({'x': px, 'y': py, 'side': side, 'corner': False})
         d -= spacing
 
-    # Walk toward arc end (the trail arm leaving the corner).
     d = corner_arc + spacing
-    while d < arcs[-1]:
+    while d <= arcs[-1] and (d - corner_arc) <= walk_radius + 1e-6:
         px, py = _point_at_arc(edge_points, arcs, d)
-        if _has_pin_nearby(pins, px, py, side, _DEDUP):
-            break
         pins.append({'x': px, 'y': py, 'side': side, 'corner': False})
         d += spacing
 

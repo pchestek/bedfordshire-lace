@@ -92,6 +92,9 @@ class LaceCanvas(QGraphicsView):
 
         # Document data
         self._elements = []  # list of (element, item) for all lace elements
+        # Derived: crossings auto-computed from trail centerline intersections.
+        # Each entry: (Crossing, CrossingItem).  Never saved, never in undo stack.
+        self._crossings = []
 
         self._initial_fit_done = False
 
@@ -192,8 +195,13 @@ class LaceCanvas(QGraphicsView):
         return [(e, i) for e, i in self._elements if isinstance(i, PlaitItem)]
 
     def all_pin_positions(self):
-        """Return all pinhole positions from all elements as (x, y) tuples."""
-        return [pos for _, item in self._elements for pos in item.pin_positions()]
+        """Return all pinhole positions from all elements as (x, y) tuples.
+
+        Includes crossing pinholes so the trail tool can snap to them.
+        """
+        pins = [pos for _, item in self._elements for pos in item.pin_positions()]
+        pins.extend(pos for _, item in self._crossings for pos in item.pin_positions())
+        return pins
 
     def trail_endpoints(self):
         """
@@ -216,6 +224,9 @@ class LaceCanvas(QGraphicsView):
         for _, item in self._elements:
             self._scene.removeItem(item)
         self._elements.clear()
+        for _, item in self._crossings:
+            self._scene.removeItem(item)
+        self._crossings.clear()
         self._undo_stack.clear()
 
     def undo_stack(self):
@@ -358,6 +369,7 @@ class LaceCanvas(QGraphicsView):
                 continue
             self._scene.addItem(item)
             self.add_element(element, item)
+        self.recompute_crossings()
 
     def node_tool(self):
         return self._node_tool
@@ -372,12 +384,109 @@ class LaceCanvas(QGraphicsView):
         return self._leaf_tally_tool
 
     def _on_undo_redo(self):
-        """Rebuild tool handles after any undo/redo so they reflect current state."""
+        """Rebuild tool handles + derived state after any undo/redo."""
+        self.recompute_crossings()
         if self._current_tool is self._node_tool:
             self._node_tool._remove_handles()
             self._node_tool._build_handles()
         elif self._current_tool is self._select_tool:
             self._select_tool._update_handles()
+
+    # ── Crossings (derived state) ─────────────────────────────────────────────
+
+    def recompute_crossings(self):
+        """Recompute trail-pair crossings and pin suppression from current trails.
+
+        Called whenever trail geometry may have changed (undo/redo, load, etc.).
+        Crossings are derived — not in the undo stack, not saved.
+        """
+        from app.geometry.crossings import find_centerline_intersections
+        from app.elements.crossing import Crossing, CrossingItem
+        from shapely.geometry import Polygon, Point
+
+        trails = self.trails()
+        trail_objs = [t for t, _ in trails]
+        intersections = find_centerline_intersections(trail_objs)
+
+        # Rebuild crossings list.  Reuse existing Crossing objects when possible
+        # (key by sorted trail uuid pair + intersection xy quantised to 0.1 mm).
+        old_by_key = {}
+        for cr, item in self._crossings:
+            key = self._crossing_key(trail_objs, cr)
+            if key is not None:
+                old_by_key[key] = (cr, item)
+
+        new_crossings = []
+        used_keys = set()
+        for hit in intersections:
+            i, j = hit['i'], hit['j']
+            ta, tb = trail_objs[i], trail_objs[j]
+            P, dir_a, dir_b = hit['P'], hit['dir_a'], hit['dir_b']
+            key = (tuple(sorted((ta.id, tb.id))),
+                   round(P[0] * 10), round(P[1] * 10))
+            if key in used_keys:
+                continue
+            used_keys.add(key)
+            if key in old_by_key:
+                cr, item = old_by_key[key]
+                cr.update_from(P, dir_a, dir_b, ta.half_width, tb.half_width)
+                cr._trail_ids = (ta.id, tb.id)
+                item.refresh()
+            else:
+                cr = Crossing(P, dir_a, dir_b, ta.half_width, tb.half_width)
+                cr._trail_ids = (ta.id, tb.id)
+                item = CrossingItem(cr)
+                self._scene.addItem(item)
+            new_crossings.append((cr, item))
+
+        # Remove crossings that no longer correspond to an intersection.
+        retained_items = {id(item) for _, item in new_crossings}
+        for _, item in self._crossings:
+            if id(item) not in retained_items:
+                self._scene.removeItem(item)
+        self._crossings = new_crossings
+
+        self._apply_pin_suppression(trails)
+
+    def _crossing_key(self, trail_objs, cr):
+        ids = getattr(cr, '_trail_ids', None)
+        if ids is None:
+            return None
+        return (tuple(sorted(ids)),
+                round(cr.P[0] * 10), round(cr.P[1] * 10))
+
+    def _apply_pin_suppression(self, trails):
+        """Mark trail pins near any crossing as 'suppressed'.
+
+        Exclusion = circle around the centerline intersection P, radius =
+        farthest-corner distance + 0.5 * pin_spacing.  Catches trail pins
+        inside the trail-overlap parallelogram and gives the 4 crossing pins
+        a half-spacing of breathing room from the next trail pin out.
+        """
+        import math
+
+        zones = []
+        for cr, _ in self._crossings:
+            max_corner = max(
+                math.hypot(c[0] - cr.P[0], c[1] - cr.P[1])
+                for c in cr.pins()
+            )
+            zones.append((cr.P, max_corner + 0.5 * PIN_SPACING_MM))
+
+        for trail, item in trails:
+            changed = False
+            for pin in trail.pin_positions:
+                was = pin.get('suppressed', False)
+                now = False
+                for (px, py), R in zones:
+                    if math.hypot(pin['x'] - px, pin['y'] - py) < R:
+                        now = True
+                        break
+                if now != was:
+                    pin['suppressed'] = now
+                    changed = True
+            if changed:
+                item.update()
 
     # ── Grid ──────────────────────────────────────────────────────────────────
 
