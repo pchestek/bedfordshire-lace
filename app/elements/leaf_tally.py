@@ -2,7 +2,7 @@
 import math
 
 from PySide6.QtCore import QRectF, QPointF, Qt
-from PySide6.QtGui import QPen, QColor, QPainterPath, QTransform
+from PySide6.QtGui import QPen, QBrush, QColor, QPainterPath, QTransform
 from PySide6.QtWidgets import QGraphicsItem
 
 from app.elements.base_element import LaceElement, _rot
@@ -69,6 +69,34 @@ class LeafTally(LaceElement):
         self.pin1       = tuple(pin1)
         self.pin2       = tuple(pin2)
         self.leaf_width = float(leaf_width)
+        # Working order at each endpoint — manual via ▶ marker.
+        self.direction_pin1 = 'entry'
+        self.direction_pin2 = 'exit'
+
+    def direction_endpoints(self):
+        """Yield (x, y, dir_unit_x, dir_unit_y, state, endpoint_id) per end."""
+        for ep_id, here, other, state in (
+            ('pin1', self.pin1, self.pin2, self.direction_pin1),
+            ('pin2', self.pin2, self.pin1, self.direction_pin2),
+        ):
+            hx, hy = here
+            ox, oy = other
+            ix, iy = ox - hx, oy - hy
+            n = math.hypot(ix, iy)
+            if n < 1e-9:
+                continue
+            ix, iy = ix / n, iy / n
+            if state == 'entry':
+                dx, dy = ix, iy
+            else:
+                dx, dy = -ix, -iy
+            yield (hx, hy, dx, dy, state, ep_id)
+
+    def flip_direction(self, endpoint_id):
+        if endpoint_id == 'pin1':
+            self.direction_pin1 = 'exit' if self.direction_pin1 == 'entry' else 'entry'
+        elif endpoint_id == 'pin2':
+            self.direction_pin2 = 'exit' if self.direction_pin2 == 'entry' else 'entry'
 
 
 class LeafTallyItem(QGraphicsItem):
@@ -101,6 +129,8 @@ class LeafTallyItem(QGraphicsItem):
             'pin1': lf.pin1,
             'pin2': lf.pin2,
             'leaf_width': lf.leaf_width,
+            'direction_pin1': lf.direction_pin1,
+            'direction_pin2': lf.direction_pin2,
         }
 
     def set_state(self, state):
@@ -108,6 +138,8 @@ class LeafTallyItem(QGraphicsItem):
         lf.pin1 = state['pin1']
         lf.pin2 = state['pin2']
         lf.leaf_width = state['leaf_width']
+        lf.direction_pin1 = state.get('direction_pin1', 'entry')
+        lf.direction_pin2 = state.get('direction_pin2', 'exit')
         self.prepareGeometryChange()
         self._build()
         self.update()
@@ -160,14 +192,15 @@ class LeafTallyItem(QGraphicsItem):
             self._leaf.pin1, self._leaf.pin2, self._leaf.leaf_width)
 
         # Bounding rect: path bounds + pin radius margin
+        # Bounding rect margin includes ~2.5mm for direction-marker triangles.
         if self._path:
             pr = self._path.boundingRect()
-            m = PINHOLE_RADIUS_MM + TRAIL_LINE_WIDTH_MM + 0.5
+            m = PINHOLE_RADIUS_MM + TRAIL_LINE_WIDTH_MM + 2.5
             self._bounding_rect = pr.adjusted(-m, -m, m, m)
         else:
             x1, y1 = self._leaf.pin1
             x2, y2 = self._leaf.pin2
-            m = PINHOLE_RADIUS_MM + 1.0
+            m = PINHOLE_RADIUS_MM + 2.5
             self._bounding_rect = QRectF(
                 min(x1, x2) - m, min(y1, y2) - m,
                 abs(x2 - x1) + 2 * m, abs(y2 - y1) + 2 * m)
@@ -195,3 +228,24 @@ class LeafTallyItem(QGraphicsItem):
         x2, y2 = self._leaf.pin2
         painter.drawEllipse(QPointF(x1, y1), r, r)
         painter.drawEllipse(QPointF(x2, y2), r, r)
+
+        # Direction markers (on-screen only)
+        from app import render_state
+        if not render_state.output_rendering:
+            self._draw_direction_markers(painter)
+
+    def _draw_direction_markers(self, painter):
+        APEX = 2.0
+        HALF_BASE = 0.8
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(QColor("#666666")))
+        for x, y, dx, dy, _state, _ep in self._leaf.direction_endpoints():
+            ax = x + APEX * dx
+            ay = y + APEX * dy
+            pdx, pdy = -dy, dx
+            path = QPainterPath()
+            path.moveTo(ax, ay)
+            path.lineTo(x + HALF_BASE * pdx, y + HALF_BASE * pdy)
+            path.lineTo(x - HALF_BASE * pdx, y - HALF_BASE * pdy)
+            path.closeSubpath()
+            painter.drawPath(path)

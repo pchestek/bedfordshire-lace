@@ -14,6 +14,7 @@ from app.tools.trail_tool import TrailTool
 from app.tools.plait_tool import PlaitTool
 from app.tools.leaf_tally_tool import LeafTallyTool
 from app.tools.node_tool import NodeTool
+from app.tools.pair_flow_tool import PairFlowTool
 
 
 class _GridItem(QGraphicsItem):
@@ -87,6 +88,7 @@ class LaceCanvas(QGraphicsView):
         self._trail_tool = TrailTool(self)
         self._plait_tool = PlaitTool(self)
         self._leaf_tally_tool = LeafTallyTool(self)
+        self._pair_flow_tool = PairFlowTool(self)
         self._current_tool = self._select_tool
         self._temp_pan_prev = None  # tool active before H-key pan
 
@@ -161,6 +163,7 @@ class LaceCanvas(QGraphicsView):
             "trail":      self._trail_tool,
             "plait":      self._plait_tool,
             "leaf_tally": self._leaf_tally_tool,
+            "pair_flow":  self._pair_flow_tool,
         }
         tool = mapping.get(name)
         if tool:
@@ -177,6 +180,8 @@ class LaceCanvas(QGraphicsView):
             return "plait"
         if self._current_tool is self._leaf_tally_tool:
             return "leaf_tally"
+        if self._current_tool is self._pair_flow_tool:
+            return "pair_flow"
         return "select"
 
     def add_element(self, element, item):
@@ -305,8 +310,11 @@ class LaceCanvas(QGraphicsView):
 
         Hides grid and selection handles; items render in their default
         (non-selected) colour so no blue highlighting appears on output.
+        Sets `render_state.output_rendering` so element paint() can suppress
+        on-screen-only adornments (direction markers, etc.).
         """
         from PySide6.QtCore import QRectF
+        from app import render_state
 
         grid_visible = self._grid_item.isVisible()
         self._grid_item.setVisible(False)
@@ -315,9 +323,13 @@ class LaceCanvas(QGraphicsView):
         prev_selected = [i for i in self._scene.items() if i.isSelected()]
         self._scene.clearSelection()
 
-        target = QRectF(0, 0, self._canvas_w * dpm, self._canvas_h * dpm)
-        source = QRectF(0, 0, self._canvas_w, self._canvas_h)
-        self._scene.render(painter, target, source)
+        render_state.output_rendering = True
+        try:
+            target = QRectF(0, 0, self._canvas_w * dpm, self._canvas_h * dpm)
+            source = QRectF(0, 0, self._canvas_w, self._canvas_h)
+            self._scene.render(painter, target, source)
+        finally:
+            render_state.output_rendering = False
 
         self._grid_item.setVisible(grid_visible)
         for item in prev_selected:
@@ -348,6 +360,9 @@ class LaceCanvas(QGraphicsView):
                     starting_pairs=ed['starting_pairs'],
                     closed=ed['closed'],
                 )
+                element.free_events = [dict(e) for e in ed.get('free_events', [])]
+                element.direction_start = ed.get('direction_start', 'entry')
+                element.direction_end   = ed.get('direction_end',   'exit')
                 element.compute_geometry()
                 item = TrailItem(element)
             elif etype == 'plait':
@@ -357,6 +372,8 @@ class LaceCanvas(QGraphicsView):
                 )
                 for pt, ps in ed.get('picots', []):
                     element.toggle_picot(pt, ps)
+                element.direction_start = ed.get('direction_start', 'entry')
+                element.direction_end   = ed.get('direction_end',   'exit')
                 item = PlaitItem(element)
             elif etype == 'leaf':
                 element = LeafTally(
@@ -364,6 +381,8 @@ class LaceCanvas(QGraphicsView):
                     pin2=tuple(ed['pin2']),
                     leaf_width=ed['leaf_width'],
                 )
+                element.direction_pin1 = ed.get('direction_pin1', 'entry')
+                element.direction_pin2 = ed.get('direction_pin2', 'exit')
                 item = LeafTallyItem(element)
             else:
                 continue
@@ -382,6 +401,9 @@ class LaceCanvas(QGraphicsView):
 
     def leaf_tally_tool(self):
         return self._leaf_tally_tool
+
+    def pair_flow_tool(self):
+        return self._pair_flow_tool
 
     def _on_undo_redo(self):
         """Rebuild tool handles + derived state after any undo/redo."""
@@ -551,6 +573,8 @@ class LaceCanvas(QGraphicsView):
             self.set_tool_by_name("select")
         elif key == Qt.Key.Key_N and not event.isAutoRepeat():
             self.set_tool_by_name("node")
+        elif key == Qt.Key.Key_F and not event.isAutoRepeat():
+            self.set_tool_by_name("pair_flow")
         elif key == Qt.Key.Key_H and not event.isAutoRepeat():
             if self._current_tool is not self._pan_tool:
                 self._temp_pan_prev = self._current_tool

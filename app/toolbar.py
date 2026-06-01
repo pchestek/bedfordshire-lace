@@ -18,6 +18,7 @@ TOOL_DEFINITIONS = [
     ("bud",          "B",  "Bud",           False),
     ("cloth_figure", "C",  "Cloth\nFigure", False),
     None,
+    ("pair_flow",    "F",  "Pair\nFlow",    True),
     ("start_point",  ".",  "Start\nPoint",  False),
 ]
 

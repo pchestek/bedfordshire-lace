@@ -2,7 +2,7 @@
 import uuid
 
 from PySide6.QtCore import QRectF, QPointF, Qt
-from PySide6.QtGui import QPen, QBrush, QColor, QPainterPath, QPainterPathStroker
+from PySide6.QtGui import QPen, QBrush, QColor, QFont, QPainterPath, QPainterPathStroker
 from PySide6.QtWidgets import QGraphicsItem
 
 from app.elements.base_element import LaceElement, _rot
@@ -35,7 +35,14 @@ class Trail(LaceElement):
                      Always a list; non-self-crossing trails have one entry,
                      self-crossing trails (figure-8) have multiple pieces.
     right_edge     : List[List[(x, y)]] — same shape as left_edge.
-    pin_positions  : list of pin dicts {'x', 'y', 'side', 'corner'}
+    pin_positions  : list of pin dicts {'x', 'y', 'side', 'corner'}.
+    free_events    : list of free pair-flow event dicts (Stage 12):
+                       {'x', 'y', 'count': int>0, 'is_cut': bool}.
+                     Marks a pin where the lacemaker manually adds (is_cut=False)
+                     or cuts (is_cut=True) `count` pairs with no connecting
+                     plait/tally/junction.  Stored as scene-mm positions so
+                     they survive move/rotate/scale; rendered as a small `+N` /
+                     `−N` text near the event position.
     """
 
     def __init__(self, waypoints, cusps=None, starting_pairs=3, closed=False):
@@ -46,11 +53,18 @@ class Trail(LaceElement):
         self.starting_pairs = starting_pairs
         self.closed         = closed
 
+        # Working order at each endpoint — Phase A Option B: user sets manually
+        # via the ▶ marker (PairFlowTool); no auto-inference yet.  Default by
+        # position: pairs enter at waypoints[0], exit at waypoints[-1].
+        self.direction_start = 'entry'
+        self.direction_end   = 'exit'
+
         self.left_edge     = []
         self.right_edge    = []
         self.centerline    = []  # dense polyline of the centerline (mm); used by crossing detection
         self.half_width    = 0.0
         self.pin_positions = []
+        self.free_events   = []  # see class docstring; Stage 12 free adds/cuts
 
     # ------------------------------------------------------------------
     # Geometry computation
@@ -87,15 +101,30 @@ class Trail(LaceElement):
 
         self.centerline = list(dense)
 
-        trail_width = self.starting_pairs * _PAIR_WIDTH_MM
-        half_width  = trail_width / 2.0
+        # Visible width is driven by PASSIVES only: 1 worker + (N-1) passives.
+        # The worker weaves through the passives without taking width.  See
+        # design_decisions.md "Pair-flow architecture / Pair counting convention".
+        def passive_half_width(pair_count):
+            passive_count = max(1, pair_count - 1)
+            return (passive_count * _PAIR_WIDTH_MM) / 2.0
+
+        half_width = passive_half_width(self.starting_pairs)
         self.half_width = half_width
 
         if self.closed:
+            # Variable width inside a closed-loop trail is not handled yet —
+            # ignore free events for closed trails for now (Phase A scope).
             self._compute_closed_edges(dense, half_width)
-        else:
+        elif not self.free_events:
+            # Open trail with no events — single offset on each side.
             self.left_edge  = offset_polyline(dense, +half_width)
             self.right_edge = offset_polyline(dense, -half_width)
+        else:
+            # Open trail with free events — split the centreline at each event
+            # and offset each segment with its own half-width.  Produces
+            # multi-piece edges with a visible step at every event pin.
+            self.left_edge, self.right_edge = self._compute_variable_width_edges(
+                dense, passive_half_width)
 
         # Need at least one non-degenerate piece on each side.
         if not any(len(p) >= 2 for p in self.left_edge) \
@@ -122,6 +151,147 @@ class Trail(LaceElement):
                 for piece in self.right_edge:
                     self.pin_positions.extend(
                         _arc_length_pinholes(piece, PIN_SPACING_MM, 'b'))
+
+    # ------------------------------------------------------------------
+    # Free pair-flow events (Stage 12)
+    # ------------------------------------------------------------------
+
+    def find_free_event(self, x, y, eps_mm=0.05):
+        """Return the index of the free_event nearest (x, y) within eps, else None."""
+        best_i = None
+        best_d2 = eps_mm * eps_mm
+        for i, e in enumerate(self.free_events):
+            d2 = (e['x'] - x) ** 2 + (e['y'] - y) ** 2
+            if d2 <= best_d2:
+                best_d2 = d2
+                best_i = i
+        return best_i
+
+    def adjust_free_event(self, x, y, delta_add=0, delta_cut=0):
+        """Apply +delta_add adds (or +delta_cut cuts) to the event at (x, y).
+
+        Either creates the event, modifies the count, flips direction, or
+        removes the event when its count drops to 0.  delta_add and delta_cut
+        are typically +1 or -1.
+
+        Returns the (updated or new) event dict, or None if the event was
+        removed entirely.
+        """
+        i = self.find_free_event(x, y)
+        if i is None:
+            count = max(0, delta_add - delta_cut)
+            is_cut = (delta_cut > delta_add)
+            if count == 0:
+                return None
+            event = {'x': float(x), 'y': float(y),
+                     'count': count, 'is_cut': is_cut}
+            self.free_events.append(event)
+            return event
+
+        e = self.free_events[i]
+        signed = (-e['count'] if e['is_cut'] else e['count']) + delta_add - delta_cut
+        if signed == 0:
+            self.free_events.pop(i)
+            return None
+        e['count'] = abs(signed)
+        e['is_cut'] = (signed < 0)
+        return e
+
+    def clear_free_event(self, x, y):
+        """Remove the free_event at (x, y) if present."""
+        i = self.find_free_event(x, y)
+        if i is not None:
+            self.free_events.pop(i)
+
+    # ------------------------------------------------------------------
+    # Direction markers (Phase A Option B — manual, no auto-inference)
+    # ------------------------------------------------------------------
+
+    def direction_endpoints(self):
+        """Yield (x, y, dir_unit_x, dir_unit_y, state, endpoint_id) per endpoint.
+
+        Closed-loop trails have no endpoints (deferred — Phase A step 4),
+        so they yield nothing here.
+
+        state ∈ {'entry', 'exit'}; endpoint_id ∈ {'start', 'end'}.
+        dir_unit is the direction the marker arrow points: for an 'entry'
+        endpoint it points INTO the trail; for an 'exit' endpoint it points
+        OUT of the trail.
+        """
+        import math
+        if self.closed or len(self.waypoints) < 2:
+            return
+        for ep_id, here, neighbour, state in (
+            ('start', self.waypoints[0],  self.waypoints[1],  self.direction_start),
+            ('end',   self.waypoints[-1], self.waypoints[-2], self.direction_end),
+        ):
+            hx, hy = here
+            nx, ny = neighbour
+            # Interior-pointing unit vector (from endpoint toward the next waypoint).
+            ix, iy = nx - hx, ny - hy
+            n = math.hypot(ix, iy)
+            if n < 1e-9:
+                continue
+            ix, iy = ix / n, iy / n
+            if state == 'entry':
+                dx, dy = ix, iy
+            else:
+                dx, dy = -ix, -iy
+            yield (hx, hy, dx, dy, state, ep_id)
+
+    def flip_direction(self, endpoint_id):
+        """Toggle the working-order direction at the given endpoint."""
+        if endpoint_id == 'start':
+            self.direction_start = 'exit' if self.direction_start == 'entry' else 'entry'
+        elif endpoint_id == 'end':
+            self.direction_end = 'exit' if self.direction_end == 'entry' else 'entry'
+
+    # ------------------------------------------------------------------
+
+    def _compute_variable_width_edges(self, dense, half_width_for):
+        """Offset the centreline piecewise: each segment between free events
+        uses its own half-width derived from the running pair count.
+
+        Returns (left_pieces, right_pieces) as the usual List[List[(x, y)]].
+        """
+        arcs = _polyline_arcs(dense)
+        total = arcs[-1] if arcs else 0.0
+        if total <= 0.0:
+            return [], []
+
+        # Resolve each event to an arc-length position + signed pair delta.
+        events = []
+        for e in self.free_events:
+            arc = _nearest_arc(dense, arcs, (e['x'], e['y']))
+            delta = -e['count'] if e['is_cut'] else e['count']
+            events.append((arc, delta))
+        events.sort(key=lambda x: x[0])
+
+        # Build segments [(start_arc, end_arc, pair_count_in_segment), ...].
+        segments = []
+        cur_count = self.starting_pairs
+        cur_arc = 0.0
+        for arc, delta in events:
+            if arc > cur_arc + 1e-9:
+                segments.append((cur_arc, arc, cur_count))
+            cur_count = max(2, cur_count + delta)  # 1 worker + ≥1 passive
+            cur_arc = arc
+        if cur_arc < total - 1e-9:
+            segments.append((cur_arc, total, cur_count))
+
+        if not segments:
+            return [], []
+
+        left_pieces  = []
+        right_pieces = []
+        for start_arc, end_arc, pc in segments:
+            sub = _polyline_sub(dense, arcs, start_arc, end_arc)
+            if len(sub) < 2:
+                continue
+            seg_half = half_width_for(pc)
+            left_pieces.extend(offset_polyline(sub,  +seg_half))
+            right_pieces.extend(offset_polyline(sub, -seg_half))
+        return left_pieces, right_pieces
 
     def _compute_closed_edges(self, dense, half_width):
         """
@@ -191,6 +361,9 @@ class TrailItem(QGraphicsItem):
             'cusps': list(t.cusps),
             'starting_pairs': t.starting_pairs,
             'closed': t.closed,
+            'free_events': [dict(e) for e in t.free_events],
+            'direction_start': t.direction_start,
+            'direction_end':   t.direction_end,
         }
 
     def set_state(self, state):
@@ -199,6 +372,9 @@ class TrailItem(QGraphicsItem):
         t.cusps = list(state['cusps'])
         t.starting_pairs = state['starting_pairs']
         t.closed = state['closed']
+        t.free_events = [dict(e) for e in state.get('free_events', [])]
+        t.direction_start = state.get('direction_start', 'entry')
+        t.direction_end   = state.get('direction_end',   'exit')
         t.compute_geometry()
         self.prepareGeometryChange()
         self._build_paths()
@@ -211,6 +387,11 @@ class TrailItem(QGraphicsItem):
     def apply_rotation(self, cx, cy, c, s, orig):
         t = self._trail
         t.waypoints = [_rot(cx, cy, c, s, x, y) for x, y in orig['waypoints']]
+        t.free_events = [
+            {**e, 'x': _rot(cx, cy, c, s, e['x'], e['y'])[0],
+                  'y': _rot(cx, cy, c, s, e['x'], e['y'])[1]}
+            for e in orig.get('free_events', t.free_events)
+        ]
         t.compute_geometry()
         self.prepareGeometryChange()
         self._build_paths()
@@ -220,6 +401,11 @@ class TrailItem(QGraphicsItem):
         t = self._trail
         t.waypoints = [(fx + (x - fx) * sx, fy + (y - fy) * sy)
                        for x, y in orig['waypoints']]
+        t.free_events = [
+            {**e, 'x': fx + (e['x'] - fx) * sx,
+                  'y': fy + (e['y'] - fy) * sy}
+            for e in orig.get('free_events', t.free_events)
+        ]
         t.compute_geometry()
         self.prepareGeometryChange()
         self._build_paths()
@@ -242,6 +428,10 @@ class TrailItem(QGraphicsItem):
         t.pin_positions = [
             {**p, 'x': p['x'] + dx, 'y': p['y'] + dy}
             for p in t.pin_positions
+        ]
+        t.free_events  = [
+            {**e, 'x': e['x'] + dx, 'y': e['y'] + dy}
+            for e in t.free_events
         ]
         self.prepareGeometryChange()
         self._build_paths()
@@ -300,9 +490,49 @@ class TrailItem(QGraphicsItem):
                 continue
             painter.drawEllipse(QPointF(pin['x'], pin['y']), r, r)
 
+        # Stage 12: free pair-flow event markers (text like "+1", "−2") rendered
+        # just up-and-to-the-right of each event's pin position.
+        if self._trail.free_events:
+            font = QFont()
+            font.setPixelSize(2)  # ~2mm tall at scene scale
+            painter.setFont(font)
+            painter.setPen(QPen(color))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            for e in self._trail.free_events:
+                glyph = ('−' if e['is_cut'] else '+') + str(e['count'])
+                painter.drawText(QPointF(e['x'] + 0.6, e['y'] - 0.4), glyph)
+
+        # Direction markers (▶ triangles at each endpoint).  On-screen only —
+        # suppressed during print/export via render_state.output_rendering.
+        from app import render_state
+        if not render_state.output_rendering:
+            self._draw_direction_markers(painter)
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _draw_direction_markers(self, painter):
+        """Draw a small triangle at each endpoint pointing in working order."""
+        APEX = 2.0          # mm — apex distance from endpoint
+        HALF_BASE = 0.8     # mm — half-width of triangle base
+        marker_color = QColor("#666666")
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(marker_color))
+        for x, y, dx, dy, _state, _ep_id in self._trail.direction_endpoints():
+            ax = x + APEX * dx
+            ay = y + APEX * dy
+            pdx, pdy = -dy, dx
+            b1x = x + HALF_BASE * pdx
+            b1y = y + HALF_BASE * pdy
+            b2x = x - HALF_BASE * pdx
+            b2y = y - HALF_BASE * pdy
+            path = QPainterPath()
+            path.moveTo(ax, ay)
+            path.lineTo(b1x, b1y)
+            path.lineTo(b2x, b2y)
+            path.closeSubpath()
+            painter.drawPath(path)
 
     def _build_paths(self):
         self._left_paths  = [p for p in (_make_path(piece) for piece in self._trail.left_edge)  if p]
@@ -311,6 +541,8 @@ class TrailItem(QGraphicsItem):
         all_pts = [pt for piece in self._trail.left_edge  for pt in piece]
         all_pts += [pt for piece in self._trail.right_edge for pt in piece]
         all_pts += [(p['x'], p['y']) for p in self._trail.pin_positions]
+        # +1 / −1 markers extend a few mm up-and-right of each event pin
+        all_pts += [(e['x'] + 4.0, e['y'] - 2.5) for e in self._trail.free_events]
 
         if not all_pts:
             self._bounding_rect = QRectF()
@@ -336,6 +568,75 @@ def _make_path(points):
     for x, y in points[1:]:
         path.lineTo(x, y)
     return path
+
+
+def _polyline_arcs(polyline):
+    """Cumulative arc lengths at each vertex of *polyline*."""
+    arcs = [0.0]
+    for i in range(1, len(polyline)):
+        dx = polyline[i][0] - polyline[i - 1][0]
+        dy = polyline[i][1] - polyline[i - 1][1]
+        arcs.append(arcs[-1] + (dx * dx + dy * dy) ** 0.5)
+    return arcs
+
+
+def _nearest_arc(polyline, arcs, target):
+    """Arc-length position on *polyline* closest to *target* (x, y)."""
+    if len(polyline) < 2:
+        return 0.0
+    tx, ty = target
+    best_d2 = float('inf')
+    best_arc = 0.0
+    for i in range(len(polyline) - 1):
+        ax, ay = polyline[i]
+        bx, by = polyline[i + 1]
+        dx, dy = bx - ax, by - ay
+        seg_sq = dx * dx + dy * dy
+        if seg_sq < 1e-12:
+            continue
+        t = max(0.0, min(1.0, ((tx - ax) * dx + (ty - ay) * dy) / seg_sq))
+        px = ax + t * dx
+        py = ay + t * dy
+        d2 = (tx - px) ** 2 + (ty - py) ** 2
+        if d2 < best_d2:
+            best_d2 = d2
+            best_arc = arcs[i] + t * (arcs[i + 1] - arcs[i])
+    return best_arc
+
+
+def _polyline_sub(polyline, arcs, start_arc, end_arc):
+    """Sub-polyline of *polyline* between *start_arc* and *end_arc*.
+
+    Endpoints are interpolated to land exactly at the arc positions.
+    """
+    if len(polyline) < 2:
+        return []
+    total = arcs[-1] if arcs else 0.0
+    start_arc = max(0.0, start_arc)
+    end_arc = min(total, end_arc)
+    if start_arc >= end_arc - 1e-9:
+        return []
+
+    def at(d):
+        if d <= 0.0:
+            return polyline[0]
+        if d >= total:
+            return polyline[-1]
+        for i in range(len(arcs) - 1):
+            if arcs[i] <= d <= arcs[i + 1]:
+                seg = arcs[i + 1] - arcs[i]
+                t = (d - arcs[i]) / seg if seg > 1e-9 else 0.0
+                ax, ay = polyline[i]
+                bx, by = polyline[i + 1]
+                return (ax + t * (bx - ax), ay + t * (by - ay))
+        return polyline[-1]
+
+    sub = [at(start_arc)]
+    for i, a in enumerate(arcs):
+        if start_arc + 1e-9 < a < end_arc - 1e-9:
+            sub.append(polyline[i])
+    sub.append(at(end_arc))
+    return sub
 
 
 def _arc_length_pinholes(polyline, spacing_mm, side):

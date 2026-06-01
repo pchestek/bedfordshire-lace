@@ -2,7 +2,7 @@
 import math
 
 from PySide6.QtCore import QRectF, QPointF, Qt
-from PySide6.QtGui import QPen, QColor
+from PySide6.QtGui import QPen, QBrush, QColor, QPainterPath
 from PySide6.QtWidgets import QGraphicsItem
 
 from app.elements.base_element import LaceElement, _rot
@@ -43,6 +43,34 @@ class Plait(LaceElement):
         self.start  = tuple(start)
         self.end    = tuple(end)
         self.picots = []
+        # Working order at each endpoint — manual via ▶ marker (PairFlowTool).
+        self.direction_start = 'entry'
+        self.direction_end   = 'exit'
+
+    def direction_endpoints(self):
+        """Yield (x, y, dir_unit_x, dir_unit_y, state, endpoint_id) per end."""
+        for ep_id, here, other, state in (
+            ('start', self.start, self.end,   self.direction_start),
+            ('end',   self.end,   self.start, self.direction_end),
+        ):
+            hx, hy = here
+            ox, oy = other
+            ix, iy = ox - hx, oy - hy
+            n = math.hypot(ix, iy)
+            if n < 1e-9:
+                continue
+            ix, iy = ix / n, iy / n
+            if state == 'entry':
+                dx, dy = ix, iy
+            else:
+                dx, dy = -ix, -iy
+            yield (hx, hy, dx, dy, state, ep_id)
+
+    def flip_direction(self, endpoint_id):
+        if endpoint_id == 'start':
+            self.direction_start = 'exit' if self.direction_start == 'entry' else 'entry'
+        elif endpoint_id == 'end':
+            self.direction_end = 'exit' if self.direction_end == 'entry' else 'entry'
 
     def toggle_picot(self, t: float, side: int):
         """Add a picot at (t, side) if absent; remove it if already present."""
@@ -100,6 +128,8 @@ class PlaitItem(QGraphicsItem):
             'start': p.start,
             'end': p.end,
             'picots': [(pic.t, pic.side) for pic in p.picots],
+            'direction_start': p.direction_start,
+            'direction_end':   p.direction_end,
         }
 
     def set_state(self, state):
@@ -107,6 +137,8 @@ class PlaitItem(QGraphicsItem):
         p.start = state['start']
         p.end = state['end']
         p.picots = [Picot(t, s) for t, s in state['picots']]
+        p.direction_start = state.get('direction_start', 'entry')
+        p.direction_end   = state.get('direction_end',   'exit')
         self.prepareGeometryChange()
         self.update()
 
@@ -145,7 +177,8 @@ class PlaitItem(QGraphicsItem):
     def boundingRect(self) -> QRectF:
         sx, sy = self._plait.start
         ex, ey = self._plait.end
-        margin = _PLAIT_HALF_WIDTH_MM + PICOT_RADIUS_MM + 1.0
+        # Margin includes ~2.5mm for direction-marker triangles past each end.
+        margin = _PLAIT_HALF_WIDTH_MM + PICOT_RADIUS_MM + 2.5
         x = min(sx, ex) - margin
         y = min(sy, ey) - margin
         w = max(abs(ex - sx), 0.1) + 2 * margin
@@ -169,3 +202,24 @@ class PlaitItem(QGraphicsItem):
         for picot in self._plait.picots:
             px, py = self._plait.picot_position(picot)
             painter.drawEllipse(QPointF(px, py), r, r)
+
+        # Direction markers (on-screen only)
+        from app import render_state
+        if not render_state.output_rendering:
+            self._draw_direction_markers(painter)
+
+    def _draw_direction_markers(self, painter):
+        APEX = 2.0
+        HALF_BASE = 0.8
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(QColor("#666666")))
+        for x, y, dx, dy, _state, _ep in self._plait.direction_endpoints():
+            ax = x + APEX * dx
+            ay = y + APEX * dy
+            pdx, pdy = -dy, dx
+            path = QPainterPath()
+            path.moveTo(ax, ay)
+            path.lineTo(x + HALF_BASE * pdx, y + HALF_BASE * pdy)
+            path.lineTo(x - HALF_BASE * pdx, y - HALF_BASE * pdy)
+            path.closeSubpath()
+            painter.drawPath(path)
