@@ -127,15 +127,15 @@ class MainWindow(QMainWindow):
         # View
         view_menu = menu.addMenu("&View")
         act_zoom_in = view_menu.addAction("Zoom &In")
-        act_zoom_in.setShortcut(QKeySequence("="))
+        act_zoom_in.setShortcut(QKeySequence("Ctrl+="))
         act_zoom_in.triggered.connect(self._canvas.zoom_in)
 
         act_zoom_out = view_menu.addAction("Zoom &Out")
-        act_zoom_out.setShortcut(QKeySequence("-"))
+        act_zoom_out.setShortcut(QKeySequence("Ctrl+-"))
         act_zoom_out.triggered.connect(self._canvas.zoom_out)
 
         act_fit = view_menu.addAction("&Fit Page")
-        act_fit.setShortcut(QKeySequence("0"))
+        act_fit.setShortcut(QKeySequence("Ctrl+0"))
         act_fit.triggered.connect(self._canvas.fit_page)
 
         view_menu.addSeparator()

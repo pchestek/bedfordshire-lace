@@ -172,8 +172,9 @@ class ToolOptionsBar(QWidget):
 
         self._stack.setCurrentIndex(0)
         labels = {
-            "select": "Select — click: select  |  Tab: cycle all  |  Alt+click: cycle overlapping  |  Shift+click: add/remove  |  [ / ]: rotate 5°  |  Shift+[ / ]: rotate 45°  |  arrows: nudge  |  Shift+arrows: micro nudge  |  Ctrl+D: duplicate",
-            "pan":    "Pan — drag to scroll the canvas  |  H: hold for temporary pan",
+            "select":    "Select — click: select  |  Tab: cycle all  |  Alt+click: cycle overlapping  |  Shift+click: add/remove  |  [ / ]: rotate 5°  |  Shift+[ / ]: rotate 45°  |  arrows: nudge  |  Shift+arrows: micro nudge  |  Ctrl+D: duplicate",
+            "pan":       "Pan — drag to scroll the canvas  |  H: hold for temporary pan",
+            "pair_flow": "Pair Flow — click pin: focus  |  + / =: add pair  |  −: cut pair  |  0 / Del: clear  |  click ▶ marker: flip direction  |  Esc: unfocus",
         }
         self._label.setText(
             labels.get(tool_name, tool_name.replace("_", " ").title()))

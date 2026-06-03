@@ -8,9 +8,9 @@ from PySide6.QtWidgets import QGraphicsItem
 from app.elements.base_element import LaceElement, _rot
 from shapely.geometry import LinearRing as ShapelyLinearRing
 
-from app.geometry.bezier import waypoints_to_bezier, dense_polyline
+from app.geometry.bezier import waypoints_to_bezier, dense_polyline, sample_uniform
 from app.geometry.offset import offset_polyline
-from app.geometry.pinholes import trail_edge_pinholes
+from app.geometry.pinholes import trail_edge_pinholes, _nearest_on_polyline
 from app.constants import PIN_SPACING_MM, PINHOLE_RADIUS_MM, TRAIL_LINE_WIDTH_MM, SELECTION_COLOR
 
 # Fallback pair-width: pair_width = pin_spacing / 2
@@ -140,17 +140,66 @@ class Trail(LaceElement):
                     PIN_SPACING_MM, segs, half_width,
                     cusps=self.cusps, closed=self.closed)
             else:
-                # Multi-piece edges (figure-8 etc.): the centreline-projection
-                # approach doesn't generalise across disjoint pieces, so fall
-                # back to simple arc-length sampling on each piece.  Loses
-                # left/right stagger matching but ensures every edge has pins.
-                self.pin_positions = []
-                for piece in self.left_edge:
-                    self.pin_positions.extend(
-                        _arc_length_pinholes(piece, PIN_SPACING_MM, 'a'))
-                for piece in self.right_edge:
-                    self.pin_positions.extend(
-                        _arc_length_pinholes(piece, PIN_SPACING_MM, 'b'))
+                # Multi-piece edges: two cases.
+                if self.free_events:
+                    # Variable-width open trail.  Use centreline-projection
+                    # (same as single-piece) but route each sample to the edge
+                    # piece whose arc range covers that sample position.  This
+                    # avoids the junction-duplicate problem that _arc_length_pinholes
+                    # produces when every piece starts with a pin at arc=0.
+                    arcs_cl = _polyline_arcs(dense)
+                    ev_arcs = sorted(
+                        _nearest_arc(dense, arcs_cl, (e['x'], e['y']))
+                        for e in self.free_events)
+                    # boundaries[i] .. boundaries[i+1] is the arc range of piece i
+                    boundaries = [0.0] + ev_arcs + [float('inf')]
+
+                    def _piece_idx(d):
+                        for _i in range(len(boundaries) - 1):
+                            if d <= boundaries[_i + 1]:
+                                return _i
+                        return len(boundaries) - 2
+
+                    cl_a = sample_uniform(segs, PIN_SPACING_MM, n_dense=50,
+                                         start_offset=0.0)
+                    cl_b = sample_uniform(segs, PIN_SPACING_MM, n_dense=50,
+                                         start_offset=PIN_SPACING_MM / 2.0)
+                    _DEDUP_SQ = (PIN_SPACING_MM * 0.55) ** 2
+
+                    def _add_pin(buf, x, y, side):
+                        for p in buf:
+                            if p['side'] == side and \
+                                    (p['x']-x)**2 + (p['y']-y)**2 < _DEDUP_SQ:
+                                return
+                        buf.append({'x': x, 'y': y, 'side': side, 'corner': False})
+
+                    pins = []
+                    for i_s, (pt, _) in enumerate(cl_a):
+                        d = i_s * PIN_SPACING_MM
+                        pi = _piece_idx(d)
+                        if pi < len(self.left_edge):
+                            px, py = _nearest_on_polyline(
+                                self.left_edge[pi], (float(pt[0]), float(pt[1])))
+                            _add_pin(pins, px, py, 'a')
+                    for i_s, (pt, _) in enumerate(cl_b):
+                        d = PIN_SPACING_MM / 2.0 + i_s * PIN_SPACING_MM
+                        pi = _piece_idx(d)
+                        if pi < len(self.right_edge):
+                            px, py = _nearest_on_polyline(
+                                self.right_edge[pi], (float(pt[0]), float(pt[1])))
+                            _add_pin(pins, px, py, 'b')
+                    self.pin_positions = pins
+                else:
+                    # Figure-8 or other self-intersection: centreline projection
+                    # doesn't generalise across disjoint lobes, so fall back to
+                    # arc-length sampling on each piece independently.
+                    self.pin_positions = []
+                    for piece in self.left_edge:
+                        self.pin_positions.extend(
+                            _arc_length_pinholes(piece, PIN_SPACING_MM, 'a'))
+                    for piece in self.right_edge:
+                        self.pin_positions.extend(
+                            _arc_length_pinholes(piece, PIN_SPACING_MM, 'b'))
 
     # ------------------------------------------------------------------
     # Free pair-flow events (Stage 12)
@@ -179,10 +228,11 @@ class Trail(LaceElement):
         """
         i = self.find_free_event(x, y)
         if i is None:
-            count = max(0, delta_add - delta_cut)
-            is_cut = (delta_cut > delta_add)
-            if count == 0:
+            signed = delta_add - delta_cut
+            if signed == 0:
                 return None
+            count = abs(signed)
+            is_cut = (signed < 0)
             event = {'x': float(x), 'y': float(y),
                      'count': count, 'is_cut': is_cut}
             self.free_events.append(event)
@@ -490,22 +540,20 @@ class TrailItem(QGraphicsItem):
                 continue
             painter.drawEllipse(QPointF(pin['x'], pin['y']), r, r)
 
-        # Stage 12: free pair-flow event markers (text like "+1", "−2") rendered
-        # just up-and-to-the-right of each event's pin position.
-        if self._trail.free_events:
-            font = QFont()
-            font.setPixelSize(2)  # ~2mm tall at scene scale
-            painter.setFont(font)
-            painter.setPen(QPen(color))
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            for e in self._trail.free_events:
-                glyph = ('−' if e['is_cut'] else '+') + str(e['count'])
-                painter.drawText(QPointF(e['x'] + 0.6, e['y'] - 0.4), glyph)
-
-        # Direction markers (▶ triangles at each endpoint).  On-screen only —
-        # suppressed during print/export via render_state.output_rendering.
+        # Stage 12 on-screen annotations — suppressed during print/export.
         from app import render_state
         if not render_state.output_rendering:
+            # Free pair-flow event markers (+1, −2, …) near each event pin.
+            if self._trail.free_events:
+                font = QFont()
+                font.setPixelSize(2)  # ~2mm tall at scene scale
+                painter.setFont(font)
+                painter.setPen(QPen(color))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                for e in self._trail.free_events:
+                    glyph = ('−' if e['is_cut'] else '+') + str(e['count'])
+                    painter.drawText(QPointF(e['x'] + 0.6, e['y'] - 0.4), glyph)
+            # Direction markers (▶ triangles at each endpoint).
             self._draw_direction_markers(painter)
 
     # ------------------------------------------------------------------

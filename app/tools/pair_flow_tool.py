@@ -100,9 +100,22 @@ class PairFlowTool(BaseTool):
         """Find the nearest trail pin within _PIN_HIT_RADIUS_MM.
 
         Returns (TrailItem, pin_x, pin_y) or None.
+
+        Prefers existing free-event locations: after a width-change recompute
+        the edge pins near an event can shift, but the event's stored (x, y)
+        doesn't move.  Returning the stored coords lets find_free_event (which
+        uses a tight 0.05 mm eps) match the event on subsequent +/- presses.
         """
+        r2 = _PIN_HIT_RADIUS_MM * _PIN_HIT_RADIUS_MM
+        for _, item in self._canvas.trails():
+            if not isinstance(item, TrailItem):
+                continue
+            for e in item.element.free_events:
+                d2 = (e['x'] - x) ** 2 + (e['y'] - y) ** 2
+                if d2 <= r2:
+                    return (item, e['x'], e['y'])
         best = None
-        best_d2 = _PIN_HIT_RADIUS_MM * _PIN_HIT_RADIUS_MM
+        best_d2 = r2
         for _, item in self._canvas.trails():
             if not isinstance(item, TrailItem):
                 continue
@@ -142,7 +155,8 @@ class PairFlowTool(BaseTool):
         item.element.adjust_free_event(x, y,
                                        delta_add=delta_add,
                                        delta_cut=delta_cut)
-        item.update()
+        item.element.compute_geometry()
+        item.update_data(item.element)
         after = capture_state(item)
         if before != after:
             self._canvas.undo_stack().push(
@@ -151,7 +165,8 @@ class PairFlowTool(BaseTool):
     def _apply_event_clear(self, item, x, y):
         before = capture_state(item)
         item.element.clear_free_event(x, y)
-        item.update()
+        item.element.compute_geometry()
+        item.update_data(item.element)
         after = capture_state(item)
         if before != after:
             self._canvas.undo_stack().push(
